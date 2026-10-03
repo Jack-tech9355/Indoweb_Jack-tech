@@ -1,0 +1,6 @@
+{
+  "name": "Indoweb",
+  "description": "Chromium-based Android browser with UserScript execution engine and script manager.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
