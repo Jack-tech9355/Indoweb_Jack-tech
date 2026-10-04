@@ -55,7 +55,9 @@ data class UserScript(
                 val uri = URI(targetUrl)
                 val scheme = uri.scheme ?: ""
                 val host = uri.host ?: ""
-                val path = (uri.rawPath ?: "") + if (uri.rawQuery != null) "?${uri.rawQuery}" else ""
+                val rawPath = uri.rawPath
+                val normalizedPath = if (rawPath.isNullOrEmpty()) "/" else rawPath
+                val fullPath = normalizedPath + if (uri.rawQuery != null) "?${uri.rawQuery}" else ""
 
                 // 1. Scheme match
                 val schemeMatch = when (schemePattern.lowercase()) {
@@ -77,13 +79,11 @@ data class UserScript(
                 if (!hostMatch) return false
 
                 // 3. Path match
-                val pathRegex = Regex.escape(pathPattern).replace("\\*", ".*")
-                Regex("^$pathRegex$", RegexOption.IGNORE_CASE).containsMatchIn(path) ||
-                        Regex(pathRegex, RegexOption.IGNORE_CASE).containsMatchIn(path)
+                val pathRegex = globToRegexString(pathPattern)
+                Regex("^$pathRegex$", RegexOption.IGNORE_CASE).containsMatchIn(fullPath) ||
+                        Regex(pathRegex, RegexOption.IGNORE_CASE).containsMatchIn(fullPath)
             } else if (pattern.contains("*")) {
-                var regexStr = Regex.escape(pattern)
-                regexStr = regexStr.replace("\\*", ".*")
-                regexStr = regexStr.replace("\\?", ".")
+                val regexStr = globToRegexString(pattern)
                 Regex(regexStr, RegexOption.IGNORE_CASE).containsMatchIn(targetUrl)
             } else {
                 // Host / domain substring match
@@ -98,6 +98,25 @@ data class UserScript(
             }
         } catch (_: Exception) {
             targetUrl.contains(pattern, ignoreCase = true)
+        }
+    }
+
+    companion object {
+        fun globToRegexString(glob: String): String {
+            val sb = java.lang.StringBuilder()
+            for (c in glob) {
+                when (c) {
+                    '*' -> sb.append(".*")
+                    '?' -> sb.append(".")
+                    '.' -> sb.append("\\.")
+                    '\\' -> sb.append("\\\\")
+                    '+', '^', '$', '(', ')', '[', ']', '{', '}', '|' -> {
+                        sb.append('\\').append(c)
+                    }
+                    else -> sb.append(c)
+                }
+            }
+            return sb.toString()
         }
     }
 }
