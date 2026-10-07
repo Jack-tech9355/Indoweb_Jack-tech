@@ -3,7 +3,6 @@ package com.example.ui.browser
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
-import android.net.Uri
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -11,6 +10,9 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import com.example.data.model.UserScript
 import com.example.ui.scripts.UserScriptEngine
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import java.io.ByteArrayInputStream
 
 class IndowebWebViewClient(
@@ -20,7 +22,9 @@ class IndowebWebViewClient(
     private val isAdBlockerEnabled: () -> Boolean = { true }
 ) : WebViewClient() {
 
-    // Known ad & tracker domain patterns for network level blocking
+    private val scope = CoroutineScope(Dispatchers.Main)
+
+    // Comprehensive list of ad, tracking, and analytics domains
     private val adDomainFilters = listOf(
         "doubleclick.net",
         "googleadservices.com",
@@ -39,23 +43,65 @@ class IndowebWebViewClient(
         "bidswitch.net",
         "rubiconproject.com",
         "pubmatic.com",
-        "casalemedia.com"
+        "casalemedia.com",
+        "google-analytics.com",
+        "googletagmanager.com",
+        "analytics.twitter.com",
+        "connect.facebook.net",
+        "hotjar.com",
+        "segment.io",
+        "amplitude.com",
+        "adjust.com",
+        "appsflyer.com",
+        "pagead2.googlesyndication.com",
+        "adroll.com",
+        "adsystem.com"
     )
 
     override fun shouldInterceptRequest(
         view: WebView?,
         request: WebResourceRequest?
     ): WebResourceResponse? {
-        if (request != null && isAdBlockerEnabled()) {
-            val urlString = request.url.toString().lowercase()
-            for (filter in adDomainFilters) {
-                if (urlString.contains(filter)) {
-                    // Block ad request by returning empty data stream
-                    return WebResourceResponse(
-                        "text/plain",
-                        "UTF-8",
-                        ByteArrayInputStream(ByteArray(0))
-                    )
+        if (request != null) {
+            val urlString = request.url.toString()
+            val urlLower = urlString.lowercase()
+
+            // 1. Ad & Tracker Interception
+            if (isAdBlockerEnabled()) {
+                for (filter in adDomainFilters) {
+                    if (urlLower.contains(filter)) {
+                        viewModel.recordAdBlocked()
+                        return WebResourceResponse(
+                            "text/plain",
+                            "UTF-8",
+                            ByteArrayInputStream(ByteArray(0))
+                        )
+                    }
+                }
+            }
+
+            // 2. Network-Level Media Sniffing (.mp4, .m3u8, .mp3, .webm, .m4a)
+            val path = request.url.path?.lowercase() ?: ""
+            if (path.endsWith(".mp4") || path.endsWith(".m3u8") || path.endsWith(".mp3") ||
+                path.endsWith(".webm") || path.endsWith(".m4a") ||
+                urlLower.contains(".m3u8?") || urlLower.contains(".mp4?")
+            ) {
+                val mimeType = when {
+                    path.endsWith(".m3u8") || urlLower.contains(".m3u8") -> "application/x-mpegurl"
+                    path.endsWith(".mp3") -> "audio/mpeg"
+                    path.endsWith(".m4a") -> "audio/mp4"
+                    path.endsWith(".webm") -> "video/webm"
+                    else -> "video/mp4"
+                }
+
+                val title = when {
+                    mimeType == "application/x-mpegurl" -> "HLS Video Stream (.m3u8)"
+                    mimeType.startsWith("audio/") -> "Audio Track (${request.url.lastPathSegment ?: "stream"})"
+                    else -> "Video Stream (${request.url.lastPathSegment ?: "video"})"
+                }
+
+                view?.post {
+                    viewModel.onMediaDetected(urlString, title, mimeType)
                 }
             }
         }
@@ -72,9 +118,9 @@ class IndowebWebViewClient(
             return true
         }
 
-        // Handle standard web schemes
+        // Standard web schemes handled by WebView
         if (url.startsWith("http://") || url.startsWith("https://") || url.startsWith("file://") || url.startsWith("about:")) {
-            return false // Let WebView load it
+            return false
         }
 
         // Handle external protocols (tel, mailto, intent, market, etc.)
@@ -103,9 +149,8 @@ class IndowebWebViewClient(
         viewModel.checkBookmarkStatus(url)
 
         if (view != null && !url.startsWith("about:") && !url.startsWith("data:")) {
-            // Inject console logger and media sniffer early
             injectCoreInfrastructure(view)
-            // Inject document_start scripts early
+            injectCosmeticAdBlockFilter(view)
             injectScriptsByStage(view, url, "document_start")
         }
     }
@@ -123,9 +168,8 @@ class IndowebWebViewClient(
 
         if (url.startsWith("about:") || url.startsWith("data:")) return
 
-        // Inject media observer
+        injectCosmeticAdBlockFilter(view)
         injectMediaSniffer(view)
-        // Inject document_end scripts after page load completes
         injectScriptsByStage(view, url, "document_end")
     }
 
@@ -168,6 +212,34 @@ class IndowebWebViewClient(
         webView.evaluateJavascript(coreJs, null)
     }
 
+    private fun injectCosmeticAdBlockFilter(webView: WebView) {
+        if (!isAdBlockerEnabled()) return
+        val cosmeticCss = """
+            (function() {
+                const styleId = 'indoweb-adblock-cosmetic';
+                if (document.getElementById(styleId)) return;
+                const style = document.createElement('style');
+                style.id = styleId;
+                style.textContent = `
+                    iframe[src*="doubleclick"], iframe[src*="adnxs"], iframe[src*="adservice"],
+                    .adsbygoogle, .ad-banner, .advertisement, [id*="google_ads"], [id*="banner-ad"],
+                    [class*="sponsored-post"], [class*="ad-container"], [data-ad-client], .ad-slot,
+                    .ad-unit, .commercial-unit, #advert, .ad_box, .banner_ad, [id*="ad_holder"],
+                    [class*="dfp-ad"], [data-adunit], .taboola-placeholder, .outbrain-placeholder {
+                        display: none !important;
+                        visibility: hidden !important;
+                        height: 0 !important;
+                        max-height: 0 !important;
+                        overflow: hidden !important;
+                        pointer-events: none !important;
+                    }
+                `;
+                (document.head || document.documentElement).appendChild(style);
+            })();
+        """.trimIndent()
+        webView.evaluateJavascript(cosmeticCss, null)
+    }
+
     private fun injectMediaSniffer(webView: WebView) {
         val snifferJs = """
             (function() {
@@ -201,33 +273,21 @@ class IndowebWebViewClient(
             viewModel.setInjectedCount(totalMatching)
         }
 
-        for (script in matchingScripts) {
-            val wrappedCode = UserScriptEngine.wrapScript(script, stage)
-            webView.evaluateJavascript(wrappedCode) { result ->
-                viewModel.recordScriptLog(
-                    scriptName = "${script.name} [$stage]",
-                    url = currentUrl,
-                    isSuccess = true,
-                    message = "Injected: ${result?.take(60) ?: "OK"}"
-                )
+        scope.launch {
+            for (script in matchingScripts) {
+                // Fetch/retrieve pre-cached @require dependency libraries (e.g. jQuery, Lodash)
+                val preloadedRequires = viewModel.dependencyManager.resolveDependencies(script.requires)
+                val wrappedCode = UserScriptEngine.wrapScript(script, stage, preloadedRequires)
+                webView.evaluateJavascript(wrappedCode) { result ->
+                    viewModel.recordScriptLog(
+                        scriptName = "${script.name} [$stage]",
+                        url = currentUrl,
+                        isSuccess = true,
+                        message = "Injected: ${result?.take(60) ?: "OK"}"
+                    )
+                }
             }
         }
-    }
-
-    private fun buildInjectedScript(script: UserScript, stage: String): String {
-        val escapedName = script.name.replace("'", "\\'")
-        return """
-            (function() {
-                try {
-                    console.log('[Indoweb] Executing (${stage}): ${escapedName}');
-                    ${script.scriptCode}
-                    return 'OK: ${escapedName}';
-                } catch (err) {
-                    console.error('[Indoweb] Error in ${escapedName}:', err);
-                    return 'ERROR: ' + err.message;
-                }
-            })();
-        """.trimIndent()
     }
 
     override fun onReceivedError(

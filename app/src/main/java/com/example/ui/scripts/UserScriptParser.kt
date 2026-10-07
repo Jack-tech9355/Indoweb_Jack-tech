@@ -17,6 +17,8 @@ object UserScriptParser {
         var runAt = "document_end"
         val matches = mutableListOf<String>()
         val grants = mutableListOf<String>()
+        val requires = mutableListOf<String>()
+        val resources = mutableListOf<String>()
 
         val headerRegex = Regex("""//\s*==UserScript==([\s\S]*?)//\s*==/UserScript==""", RegexOption.MULTILINE)
         val headerMatch = headerRegex.find(rawCode)
@@ -36,11 +38,14 @@ object UserScriptParser {
                         "version" -> version = value
                         "author" -> author = value
                         "match", "include" -> if (value.isNotBlank()) matches.add(value)
+                        "require" -> if (value.isNotBlank()) requires.add(value)
+                        "resource" -> if (value.isNotBlank()) resources.add(value)
                         "run-at" -> {
                             runAt = when (value.lowercase().replace("_", "-")) {
                                 "document-start" -> "document_start"
                                 "document-body" -> "document_start"
                                 "document-idle" -> "document_end"
+                                "document-end" -> "document_end"
                                 else -> "document_end"
                             }
                         }
@@ -76,6 +81,8 @@ object UserScriptParser {
             author = author,
             version = version,
             isBuiltIn = false,
+            requires = requires.joinToString(","),
+            resources = resources.joinToString("\n"),
             createdAt = System.currentTimeMillis(),
             updatedAt = System.currentTimeMillis()
         )

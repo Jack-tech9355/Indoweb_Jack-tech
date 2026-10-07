@@ -18,6 +18,8 @@ data class WebTab(
     val isReaderMode: Boolean = false,
     val detectedMediaUrl: String? = null,
     val detectedMediaTitle: String? = null,
+    val mediaType: String? = null,
+    val blockedAdsCount: Int = 0,
     val createdAt: Long = System.currentTimeMillis()
 )
 

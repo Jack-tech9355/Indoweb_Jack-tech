@@ -18,6 +18,8 @@ data class UserScript(
     val author: String = "User",
     val version: String = "1.0",
     val isBuiltIn: Boolean = false,
+    val requires: String = "", // Comma/newline-separated URLs of dependencies (e.g. jQuery)
+    val resources: String = "", // Key-value pairs of @resource dependencies
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis()
 ) {

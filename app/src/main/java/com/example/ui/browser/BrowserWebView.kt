@@ -6,6 +6,7 @@ import android.content.Context
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.URLUtil
@@ -13,16 +14,17 @@ import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
+import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.foundation.background
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
@@ -30,14 +32,12 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 
@@ -45,43 +45,40 @@ import androidx.compose.ui.viewinterop.AndroidView
 @Composable
 fun BrowserWebView(
     viewModel: BrowserViewModel,
-    onWebViewCreated: (WebView) -> Unit,
+    onActiveWebViewChanged: (WebView) -> Unit,
     onOpenFileChooser: ((ValueCallback<Array<Uri>>?, WebChromeClient.FileChooserParams?) -> Boolean)? = null,
+    onShowFullscreen: ((View, WebChromeClient.CustomViewCallback) -> Unit)? = null,
+    onHideFullscreen: (() -> Unit)? = null,
     onDownloadTriggered: ((String, String) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
-    val context = LocalContext.current
+    val tabs by viewModel.tabs.collectAsState()
+    val activeTabId by viewModel.activeTabId.collectAsState()
     val uiState by viewModel.uiState.collectAsState()
     val enabledScripts by viewModel.enabledScripts.collectAsState()
 
-    var webViewInstance by remember { mutableStateOf<WebView?>(null) }
-    var defaultUserAgent by remember { mutableStateOf<String?>(null) }
+    val webViewPool = remember { mutableMapOf<String, WebView>() }
+    var activeWebViewInstance by remember { mutableStateOf<WebView?>(null) }
 
-    // Intercept back button if WebView can go back
+    // Intercept back button if active WebView can go back
     BackHandler(enabled = uiState.canGoBack) {
-        webViewInstance?.let { wv ->
+        activeWebViewInstance?.let { wv ->
             if (wv.canGoBack()) {
                 wv.goBack()
             }
         }
     }
 
-    // React to User-Agent & Desktop Mode changes
-    LaunchedEffect(uiState.userAgentType, uiState.isDesktopMode) {
-        webViewInstance?.settings?.let { settings ->
+    // React to User-Agent & Desktop Mode changes on active WebView
+    LaunchedEffect(uiState.userAgentType, uiState.isDesktopMode, activeTabId) {
+        activeWebViewInstance?.settings?.let { settings ->
             val customUa = uiState.userAgentType.userAgentString
             if (customUa != null) {
-                if (defaultUserAgent == null) {
-                    defaultUserAgent = settings.userAgentString
-                }
                 settings.userAgentString = customUa
                 settings.useWideViewPort = true
                 settings.loadWithOverviewMode = true
             } else {
-                defaultUserAgent?.let { settings.userAgentString = it }
-            }
-            if (uiState.currentUrl.isNotBlank() && !uiState.currentUrl.startsWith("about:")) {
-                webViewInstance?.reload()
+                settings.userAgentString = null // Reset to default WebView UA
             }
         }
     }
@@ -89,14 +86,14 @@ fun BrowserWebView(
     // Search query find in page
     LaunchedEffect(uiState.findQuery) {
         if (uiState.findQuery.isBlank()) {
-            webViewInstance?.clearMatches()
+            activeWebViewInstance?.clearMatches()
         } else {
-            webViewInstance?.findAllAsync(uiState.findQuery)
+            activeWebViewInstance?.findAllAsync(uiState.findQuery)
         }
     }
 
     // Handle Reader Mode Injection
-    LaunchedEffect(uiState.isReaderMode) {
+    LaunchedEffect(uiState.isReaderMode, activeTabId) {
         if (uiState.isReaderMode) {
             val readerCss = """
                 (function() {
@@ -132,9 +129,9 @@ fun BrowserWebView(
                     document.head.appendChild(style);
                 })();
             """.trimIndent()
-            webViewInstance?.evaluateJavascript(readerCss, null)
+            activeWebViewInstance?.evaluateJavascript(readerCss, null)
         } else {
-            webViewInstance?.evaluateJavascript(
+            activeWebViewInstance?.evaluateJavascript(
                 "const s = document.getElementById('indoweb-reader-view-style'); if(s) s.remove();",
                 null
             )
@@ -149,10 +146,10 @@ fun BrowserWebView(
                 detectHorizontalDragGestures(
                     onDragStart = { totalDragX = 0f },
                     onDragEnd = {
-                        if (totalDragX > 160f && webViewInstance?.canGoBack() == true) {
-                            webViewInstance?.goBack()
-                        } else if (totalDragX < -160f && webViewInstance?.canGoForward() == true) {
-                            webViewInstance?.goForward()
+                        if (totalDragX > 160f && activeWebViewInstance?.canGoBack() == true) {
+                            activeWebViewInstance?.goBack()
+                        } else if (totalDragX < -160f && activeWebViewInstance?.canGoForward() == true) {
+                            activeWebViewInstance?.goForward()
                         }
                     },
                     onHorizontalDrag = { _, dragAmount ->
@@ -164,111 +161,154 @@ fun BrowserWebView(
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { ctx ->
-                WebView(ctx).apply {
+                FrameLayout(ctx).apply {
                     layoutParams = ViewGroup.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.MATCH_PARENT
                     )
-
-                    // Chromium WebView configuration
-                    settings.apply {
-                        javaScriptEnabled = true
-                        domStorageEnabled = true
-                        databaseEnabled = true
-                        allowFileAccess = true
-                        allowContentAccess = true
-
-                        mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-
-                        setSupportZoom(true)
-                        builtInZoomControls = true
-                        displayZoomControls = false
-
-                        useWideViewPort = true
-                        loadWithOverviewMode = true
-
-                        cacheMode = if (uiState.isIncognito) WebSettings.LOAD_NO_CACHE else WebSettings.LOAD_DEFAULT
-                        mediaPlaybackRequiresUserGesture = false // Enables background media & autoplay
-
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                            safeBrowsingEnabled = true
-                        }
-                    }
-
-                    // Cookie manager configuration
-                    val cookieManager = CookieManager.getInstance()
-                    if (uiState.isIncognito) {
-                        cookieManager.setAcceptCookie(false)
-                        cookieManager.setAcceptThirdPartyCookies(this, false)
-                    } else {
-                        cookieManager.setAcceptCookie(true)
-                        cookieManager.setAcceptThirdPartyCookies(this, true)
-                    }
-
-                    // Attach JS Bridge for Media Sniffing & Console Capture
-                    addJavascriptInterface(
-                        IndowebJsBridge(
-                            onMediaDetected = { url, title, mimeType ->
-                                viewModel.onMediaDetected(url, title, mimeType)
-                            },
-                            onConsoleLog = { level, message ->
-                                viewModel.recordJsConsole(level, message)
-                            }
-                        ),
-                        "IndowebBridge"
-                    )
-
-                    // Attach custom clients
-                    webViewClient = IndowebWebViewClient(
-                        context = ctx,
-                        viewModel = viewModel,
-                        getEnabledScripts = { enabledScripts },
-                        isAdBlockerEnabled = { true }
-                    )
-
-                    webChromeClient = IndowebWebChromeClient(
-                        context = ctx,
-                        viewModel = viewModel,
-                        onFileChooser = onOpenFileChooser
-                    )
-
-                    // File Download Listener using Android DownloadManager
-                    setDownloadListener { downloadUrl, userAgent, contentDisposition, mimetype, contentLength ->
-                        try {
-                            val fileName = URLUtil.guessFileName(downloadUrl, contentDisposition, mimetype)
-                            val request = DownloadManager.Request(Uri.parse(downloadUrl)).apply {
-                                setMimeType(mimetype)
-                                val cookies = CookieManager.getInstance().getCookie(downloadUrl)
-                                addRequestHeader("cookie", cookies)
-                                addRequestHeader("User-Agent", userAgent)
-                                setDescription("Downloading file via Indoweb...")
-                                setTitle(fileName)
-                                setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                                setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
-                            }
-
-                            val dm = ctx.getSystemService(Context.DOWNLOAD_SERVICE) as? DownloadManager
-                            dm?.enqueue(request)
-                            Toast.makeText(ctx, "Starting download: $fileName", Toast.LENGTH_SHORT).show()
-                            onDownloadTriggered?.invoke(fileName, downloadUrl)
-                        } catch (e: Exception) {
-                            Toast.makeText(ctx, "Download failed: ${e.message}", Toast.LENGTH_SHORT).show()
-                        }
-                    }
-
-                    defaultUserAgent = settings.userAgentString
-                    webViewInstance = this
-                    onWebViewCreated(this)
                 }
             },
-            update = { webView ->
-                webViewInstance = webView
+            update = { container ->
+                // 1. Clean up closed tabs from pool to avoid memory leaks
+                val currentTabIds = tabs.map { it.id }.toSet()
+                val closedIds = webViewPool.keys.filter { it !in currentTabIds }
+                for (id in closedIds) {
+                    val deadWv = webViewPool.remove(id)
+                    deadWv?.apply {
+                        stopLoading()
+                        loadUrl("about:blank")
+                        onPause()
+                        clearHistory()
+                        container.removeView(this)
+                        destroy()
+                    }
+                }
+
+                // 2. Instantiate or synchronize WebViews for active & background tabs
+                for (tab in tabs) {
+                    var wv = webViewPool[tab.id]
+                    if (wv == null) {
+                        wv = WebView(container.context).apply {
+                            layoutParams = FrameLayout.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT
+                            )
+
+                            // Chromium WebView Settings
+                            settings.apply {
+                                javaScriptEnabled = true
+                                domStorageEnabled = true
+                                databaseEnabled = true
+                                allowFileAccess = true
+                                allowContentAccess = true
+                                mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                                setSupportZoom(true)
+                                builtInZoomControls = true
+                                displayZoomControls = false
+                                useWideViewPort = true
+                                loadWithOverviewMode = true
+                                cacheMode = if (tab.isIncognito) WebSettings.LOAD_NO_CACHE else WebSettings.LOAD_DEFAULT
+                                mediaPlaybackRequiresUserGesture = false // Keeps background media & audio alive
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                    safeBrowsingEnabled = true
+                                }
+                            }
+
+                            // Cookie isolation
+                            val cookieManager = CookieManager.getInstance()
+                            if (tab.isIncognito) {
+                                cookieManager.setAcceptCookie(false)
+                                cookieManager.setAcceptThirdPartyCookies(this, false)
+                            } else {
+                                cookieManager.setAcceptCookie(true)
+                                cookieManager.setAcceptThirdPartyCookies(this, true)
+                            }
+
+                            // JS Bridge for media sniffer, console logs & native OkHttp CORS bypass
+                            addJavascriptInterface(
+                                IndowebJsBridge(
+                                    webViewProvider = { this },
+                                    onMediaDetected = { url, title, mime ->
+                                        viewModel.onMediaDetected(url, title, mime)
+                                    },
+                                    onConsoleLog = { level, msg ->
+                                        viewModel.recordJsConsole(level, msg)
+                                    }
+                                ),
+                                "IndowebBridge"
+                            )
+
+                            webViewClient = IndowebWebViewClient(
+                                context = container.context,
+                                viewModel = viewModel,
+                                getEnabledScripts = { enabledScripts },
+                                isAdBlockerEnabled = { uiState.isAdBlockerEnabled }
+                            )
+
+                            webChromeClient = IndowebWebChromeClient(
+                                context = container.context,
+                                viewModel = viewModel,
+                                onFileChooser = onOpenFileChooser,
+                                onShowFullscreen = onShowFullscreen,
+                                onHideFullscreen = onHideFullscreen
+                            )
+
+                            // File Download Listener
+                            setDownloadListener { downloadUrl, userAgent, contentDisposition, mimetype, _ ->
+                                try {
+                                    val fileName = URLUtil.guessFileName(downloadUrl, contentDisposition, mimetype)
+                                    val request = DownloadManager.Request(Uri.parse(downloadUrl)).apply {
+                                        setMimeType(mimetype)
+                                        val cookies = CookieManager.getInstance().getCookie(downloadUrl)
+                                        addRequestHeader("cookie", cookies)
+                                        addRequestHeader("User-Agent", userAgent)
+                                        setDescription("Downloading file via Indoweb...")
+                                        setTitle(fileName)
+                                        setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                                        setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
+                                    }
+                                    val dm = container.context.getSystemService(Context.DOWNLOAD_SERVICE) as? DownloadManager
+                                    dm?.enqueue(request)
+                                    Toast.makeText(container.context, "Starting download: $fileName", Toast.LENGTH_SHORT).show()
+                                    onDownloadTriggered?.invoke(fileName, downloadUrl)
+                                } catch (e: Exception) {
+                                    Toast.makeText(container.context, "Download failed: ${e.message}", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+
+                            if (tab.url.isNotBlank() && tab.url != "about:blank") {
+                                loadUrl(tab.url)
+                            }
+                        }
+
+                        webViewPool[tab.id] = wv
+                        container.addView(wv)
+                    }
+
+                    // 3. Tab Visibility Switching: PRESERVES DOM, VIDEO, JS, SCROLL & HISTORY
+                    if (tab.id == activeTabId) {
+                        wv.visibility = View.VISIBLE
+                        wv.bringToFront()
+                        activeWebViewInstance = wv
+                        onActiveWebViewChanged(wv)
+
+                        // If tab URL changed externally and hasn't loaded yet
+                        if (tab.url.isNotBlank() && tab.url != "about:blank" && wv.url != tab.url && !tab.isLoading) {
+                            wv.loadUrl(tab.url)
+                        }
+                    } else {
+                        // Background tabs stay alive in memory without destroying state
+                        wv.visibility = View.GONE
+                    }
+                }
             }
         )
 
         // Loading indicator
         AnimatedVisibility(
             visible = uiState.isLoading,
+            enter = fadeIn(),
+            exit = fadeOut(),
             modifier = Modifier.align(Alignment.TopCenter)
         ) {
             LinearProgressIndicator(
@@ -283,10 +323,12 @@ fun BrowserWebView(
 
     DisposableEffect(Unit) {
         onDispose {
-            webViewInstance?.apply {
-                stopLoading()
-                clearMatches()
+            webViewPool.values.forEach { wv ->
+                wv.stopLoading()
+                wv.clearMatches()
+                wv.destroy()
             }
+            webViewPool.clear()
         }
     }
 }

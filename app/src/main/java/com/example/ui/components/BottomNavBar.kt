@@ -23,6 +23,8 @@ import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Archive
+import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.ShoppingBag
 import androidx.compose.material.icons.filled.Tab
 import androidx.compose.material.icons.filled.Terminal
@@ -68,6 +70,8 @@ fun BottomNavBar(
     onOpenSettings: () -> Unit,
     onFindInPage: () -> Unit,
     onShare: () -> Unit,
+    onOpenSiteShield: () -> Unit = {},
+    onSaveMhtml: () -> Unit = {},
     onClearData: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -242,6 +246,22 @@ fun BottomNavBar(
                         }
                     )
 
+                    // Site Shield & Privacy
+                    DropdownMenuItem(
+                        text = { Text("Site Shield & Privacy") },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Default.Shield,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        },
+                        onClick = {
+                            isMenuOpen = false
+                            onOpenSiteShield()
+                        }
+                    )
+
                     // UserScript Store
                     DropdownMenuItem(
                         text = { Text("UserScript Store") },
@@ -254,6 +274,21 @@ fun BottomNavBar(
                         onClick = {
                             isMenuOpen = false
                             onOpenScriptStore()
+                        }
+                    )
+
+                    // Save as Offline Web Archive
+                    DropdownMenuItem(
+                        text = { Text("Save Offline Archive (.mhtml)") },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Default.Archive,
+                                contentDescription = null
+                            )
+                        },
+                        onClick = {
+                            isMenuOpen = false
+                            onSaveMhtml()
                         }
                     )
 

@@ -3,6 +3,8 @@ package com.example.ui.browser
 import android.app.Application
 import android.content.Context
 import android.webkit.CookieManager
+import android.webkit.GeolocationPermissions
+import android.webkit.PermissionRequest
 import android.webkit.WebStorage
 import android.webkit.WebView
 import androidx.lifecycle.AndroidViewModel
@@ -14,17 +16,22 @@ import com.example.data.model.UserAgentType
 import com.example.data.model.UserScript
 import com.example.data.model.WebTab
 import com.example.data.repository.BrowserRepository
+import com.example.data.repository.GreasyForkRepository
+import com.example.data.repository.GreasyForkScriptItem
+import com.example.ui.scripts.UserScriptDependencyManager
+import com.example.ui.scripts.UserScriptParser
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import com.example.ui.scripts.UserScriptParser
 import org.json.JSONArray
 import org.json.JSONObject
+import java.net.URI
+import java.net.URLEncoder
 
 data class ScriptLog(
     val id: String = java.util.UUID.randomUUID().toString(),
@@ -42,6 +49,20 @@ data class JsConsoleLog(
     val message: String
 )
 
+sealed class WebPermissionPrompt {
+    data class Device(
+        val origin: String,
+        val resources: List<String>,
+        val labels: List<String>,
+        val request: PermissionRequest
+    ) : WebPermissionPrompt()
+
+    data class Geolocation(
+        val origin: String,
+        val callback: GeolocationPermissions.Callback
+    ) : WebPermissionPrompt()
+}
+
 data class BrowserUiState(
     val currentUrl: String = "",
     val inputUrl: String = "",
@@ -55,12 +76,15 @@ data class BrowserUiState(
     val isBookmarked: Boolean = false,
     val isSecure: Boolean = false,
     val injectedScriptsCount: Int = 0,
-    val searchEngine: String = "DuckDuckGo", // DuckDuckGo, Google, or Bing
+    val searchEngine: String = "DuckDuckGo", // DuckDuckGo, Google, Bing, Yahoo, Ecosia, Brave, Startpage
     val isAddressBarAtBottom: Boolean = false,
     val isIncognito: Boolean = false,
     val isReaderMode: Boolean = false,
+    val isAdBlockerEnabled: Boolean = true,
+    val blockedAdsCount: Int = 0,
     val detectedMediaUrl: String? = null,
     val detectedMediaTitle: String? = null,
+    val detectedMediaType: String? = null,
     val findQuery: String = "",
     val isFindBarVisible: Boolean = false,
     val isScriptsSheetVisible: Boolean = false,
@@ -69,18 +93,24 @@ data class BrowserUiState(
     val isScriptStoreVisible: Boolean = false,
     val isJsConsoleVisible: Boolean = false,
     val isSettingsSheetVisible: Boolean = false,
+    val isSiteShieldVisible: Boolean = false,
     val scriptBeingEdited: UserScript? = null,
     val isAddingScript: Boolean = false,
     val pendingInstallScript: UserScript? = null,
     val isFetchingScript: Boolean = false,
     val showSslDialog: Boolean = false,
-    val consoleMessage: String? = null
+    val consoleMessage: String? = null,
+    val greasyForkSearchQuery: String = "",
+    val isSearchingGreasyFork: Boolean = false,
+    val greasyForkResults: List<GreasyForkScriptItem> = emptyList()
 )
 
 class BrowserViewModel(application: Application) : AndroidViewModel(application) {
 
     private val prefs = application.getSharedPreferences("indoweb_session_prefs", Context.MODE_PRIVATE)
     private val repository: BrowserRepository
+    private val greasyForkRepo = GreasyForkRepository()
+    val dependencyManager = UserScriptDependencyManager(application)
 
     private val _tabs = MutableStateFlow<List<WebTab>>(emptyList())
     val tabs: StateFlow<List<WebTab>> = _tabs.asStateFlow()
@@ -97,6 +127,9 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     private val _jsConsoleLogs = MutableStateFlow<List<JsConsoleLog>>(emptyList())
     val jsConsoleLogs: StateFlow<List<JsConsoleLog>> = _jsConsoleLogs.asStateFlow()
 
+    private val _pendingPermissionPrompt = MutableStateFlow<WebPermissionPrompt?>(null)
+    val pendingPermissionPrompt: StateFlow<WebPermissionPrompt?> = _pendingPermissionPrompt.asStateFlow()
+
     init {
         val database = AppDatabase.getDatabase(application, viewModelScope)
         repository = BrowserRepository(
@@ -112,7 +145,14 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         // Restore saved settings
         val isBottomBar = prefs.getBoolean("address_bar_bottom", false)
         val savedEngine = prefs.getString("search_engine", "DuckDuckGo") ?: "DuckDuckGo"
-        _uiState.update { it.copy(isAddressBarAtBottom = isBottomBar, searchEngine = savedEngine) }
+        val adBlocker = prefs.getBoolean("ad_blocker_enabled", true)
+        _uiState.update {
+            it.copy(
+                isAddressBarAtBottom = isBottomBar,
+                searchEngine = savedEngine,
+                isAdBlockerEnabled = adBlocker
+            )
+        }
 
         // Restore saved session tabs
         restoreSavedTabs()
@@ -169,7 +209,6 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     }
 
     private fun saveTabsSession() {
-        // Save non-incognito tabs
         val regularTabs = _tabs.value.filter { !it.isIncognito }
         val array = JSONArray()
         for (tab in regularTabs) {
@@ -198,7 +237,6 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     fun closeTab(tabId: String) {
         val currentTabs = _tabs.value
         if (currentTabs.size <= 1) {
-            // If only 1 tab left, reset to new tab
             val freshTab = WebTab(url = "", title = "Start Page")
             _tabs.value = listOf(freshTab)
             _activeTabId.value = freshTab.id
@@ -222,7 +260,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         _uiState.update { it.copy(isTabSwitcherVisible = false) }
     }
 
-    fun closeAllTabs(keepIncognito: Boolean = false) {
+    fun closeAllTabs() {
         val freshTab = WebTab(url = "", title = "Start Page")
         _tabs.value = listOf(freshTab)
         _activeTabId.value = freshTab.id
@@ -247,7 +285,9 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
                 isIncognito = tab.isIncognito,
                 isReaderMode = tab.isReaderMode,
                 detectedMediaUrl = tab.detectedMediaUrl,
-                detectedMediaTitle = tab.detectedMediaTitle
+                detectedMediaTitle = tab.detectedMediaTitle,
+                detectedMediaType = tab.mediaType,
+                blockedAdsCount = tab.blockedAdsCount
             )
         }
     }
@@ -281,7 +321,9 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
                 progress = 15,
                 isSecure = formatted.startsWith("https://"),
                 detectedMediaUrl = null,
-                detectedMediaTitle = null
+                detectedMediaTitle = null,
+                mediaType = null,
+                blockedAdsCount = 0
             )
         }
     }
@@ -292,7 +334,9 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
                 url = url,
                 isLoading = true,
                 isSecure = url.startsWith("https://"),
-                detectedMediaUrl = null
+                detectedMediaUrl = null,
+                detectedMediaTitle = null,
+                mediaType = null
             )
         }
     }
@@ -313,7 +357,6 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
             )
         }
 
-        // Record history only if NOT incognito
         if (currentTab?.isIncognito == false && !url.startsWith("about:") && url.isNotBlank()) {
             viewModelScope.launch {
                 repository.addHistory(resolvedTitle, url)
@@ -334,6 +377,19 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         if (!title.isNullOrBlank()) {
             updateActiveTab { it.copy(title = title) }
         }
+    }
+
+    fun recordAdBlocked() {
+        updateActiveTab {
+            it.copy(blockedAdsCount = it.blockedAdsCount + 1)
+        }
+    }
+
+    fun toggleAdBlocker() {
+        val nextState = !_uiState.value.isAdBlockerEnabled
+        _uiState.update { it.copy(isAdBlockerEnabled = nextState) }
+        prefs.edit().putBoolean("ad_blocker_enabled", nextState).apply()
+        _uiState.update { it.copy(consoleMessage = if (nextState) "Ad & Tracker Blocker enabled" else "Ad Blocker disabled") }
     }
 
     fun toggleDesktopMode() {
@@ -371,14 +427,21 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         updateActiveTab {
             it.copy(
                 detectedMediaUrl = mediaUrl,
-                detectedMediaTitle = mediaTitle.ifBlank { "Media Stream ($mimeType)" }
+                detectedMediaTitle = mediaTitle.ifBlank { "Media Stream" },
+                mediaType = mimeType
             )
         }
-        _uiState.update { it.copy(consoleMessage = "Playable media detected!") }
+        _uiState.update { it.copy(consoleMessage = "Playable media detected: $mimeType") }
     }
 
     fun clearDetectedMedia() {
-        updateActiveTab { it.copy(detectedMediaUrl = null, detectedMediaTitle = null) }
+        updateActiveTab {
+            it.copy(
+                detectedMediaUrl = null,
+                detectedMediaTitle = null,
+                mediaType = null
+            )
+        }
     }
 
     fun toggleReaderMode() {
@@ -410,13 +473,219 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    // -------------------------------------------------------------
+    // WEB PERMISSIONS HANDLING (Camera, Mic, Geolocation)
+    // -------------------------------------------------------------
+
+    fun handlePermissionRequest(request: PermissionRequest?) {
+        if (request == null) return
+        val origin = request.origin.toString()
+        val resources = request.resources
+        val cleanOrigin = sanitizeOrigin(origin)
+
+        // Check if decision is already remembered in prefs
+        val anyDenied = resources.any { prefs.getString("perm_${cleanOrigin}_$it", null) == "DENY" }
+        if (anyDenied) {
+            request.deny()
+            return
+        }
+
+        val allAllowed = resources.all { prefs.getString("perm_${cleanOrigin}_$it", null) == "ALLOW" }
+        if (allAllowed) {
+            request.grant(resources)
+            return
+        }
+
+        val labels = resources.map { res ->
+            when (res) {
+                PermissionRequest.RESOURCE_VIDEO_CAPTURE -> "Camera"
+                PermissionRequest.RESOURCE_AUDIO_CAPTURE -> "Microphone"
+                PermissionRequest.RESOURCE_PROTECTED_MEDIA_ID -> "Protected Media ID"
+                else -> res.substringAfterLast(".")
+            }
+        }
+
+        _pendingPermissionPrompt.value = WebPermissionPrompt.Device(
+            origin = origin,
+            resources = resources.toList(),
+            labels = labels,
+            request = request
+        )
+    }
+
+    fun handleGeolocationPermission(origin: String?, callback: GeolocationPermissions.Callback?) {
+        if (origin == null || callback == null) return
+        val cleanOrigin = sanitizeOrigin(origin)
+        val saved = prefs.getString("perm_${cleanOrigin}_geo", null)
+
+        if (saved == "ALLOW") {
+            callback.invoke(origin, true, true)
+            return
+        } else if (saved == "DENY") {
+            callback.invoke(origin, false, true)
+            return
+        }
+
+        _pendingPermissionPrompt.value = WebPermissionPrompt.Geolocation(origin, callback)
+    }
+
+    fun grantPermissionPrompt(prompt: WebPermissionPrompt, remember: Boolean) {
+        when (prompt) {
+            is WebPermissionPrompt.Device -> {
+                if (remember) {
+                    val clean = sanitizeOrigin(prompt.origin)
+                    val editor = prefs.edit()
+                    prompt.resources.forEach { res ->
+                        editor.putString("perm_${clean}_$res", "ALLOW")
+                    }
+                    editor.apply()
+                }
+                prompt.request.grant(prompt.resources.toTypedArray())
+            }
+            is WebPermissionPrompt.Geolocation -> {
+                if (remember) {
+                    val clean = sanitizeOrigin(prompt.origin)
+                    prefs.edit().putString("perm_${clean}_geo", "ALLOW").apply()
+                }
+                prompt.callback.invoke(prompt.origin, true, remember)
+            }
+        }
+        _pendingPermissionPrompt.value = null
+    }
+
+    fun denyPermissionPrompt(prompt: WebPermissionPrompt, remember: Boolean) {
+        when (prompt) {
+            is WebPermissionPrompt.Device -> {
+                if (remember) {
+                    val clean = sanitizeOrigin(prompt.origin)
+                    val editor = prefs.edit()
+                    prompt.resources.forEach { res ->
+                        editor.putString("perm_${clean}_$res", "DENY")
+                    }
+                    editor.apply()
+                }
+                prompt.request.deny()
+            }
+            is WebPermissionPrompt.Geolocation -> {
+                if (remember) {
+                    val clean = sanitizeOrigin(prompt.origin)
+                    prefs.edit().putString("perm_${clean}_geo", "DENY").apply()
+                }
+                prompt.callback.invoke(prompt.origin, false, remember)
+            }
+        }
+        _pendingPermissionPrompt.value = null
+    }
+
+    fun getOriginPermissions(origin: String): Map<String, Boolean?> {
+        val clean = sanitizeOrigin(origin)
+        val cam = prefs.getString("perm_${clean}_${PermissionRequest.RESOURCE_VIDEO_CAPTURE}", null)
+        val mic = prefs.getString("perm_${clean}_${PermissionRequest.RESOURCE_AUDIO_CAPTURE}", null)
+        val geo = prefs.getString("perm_${clean}_geo", null)
+        return mapOf(
+            "Camera" to (if (cam == "ALLOW") true else if (cam == "DENY") false else null),
+            "Microphone" to (if (mic == "ALLOW") true else if (mic == "DENY") false else null),
+            "Location" to (if (geo == "ALLOW") true else if (geo == "DENY") false else null)
+        )
+    }
+
+    fun setOriginPermission(origin: String, type: String, allowed: Boolean?) {
+        val clean = sanitizeOrigin(origin)
+        val key = when (type) {
+            "Camera" -> "perm_${clean}_${PermissionRequest.RESOURCE_VIDEO_CAPTURE}"
+            "Microphone" -> "perm_${clean}_${PermissionRequest.RESOURCE_AUDIO_CAPTURE}"
+            "Location" -> "perm_${clean}_geo"
+            else -> return
+        }
+        val editor = prefs.edit()
+        if (allowed == null) {
+            editor.remove(key)
+        } else {
+            editor.putString(key, if (allowed) "ALLOW" else "DENY")
+        }
+        editor.apply()
+    }
+
+    fun clearOriginData(origin: String, webView: WebView?) {
+        val host = try { URI(origin).host } catch (_: Exception) { "" }
+        if (!host.isNullOrBlank()) {
+            val cm = CookieManager.getInstance()
+            val cookies = cm.getCookie(origin)
+            if (cookies != null) {
+                cookies.split(";").forEach { cookie ->
+                    val name = cookie.substringBefore("=").trim()
+                    cm.setCookie(origin, "$name=; Expires=Thu, 01 Jan 1970 00:00:00 GMT")
+                }
+            }
+            WebStorage.getInstance().deleteOrigin(origin)
+            webView?.clearCache(true)
+            _uiState.update { it.copy(consoleMessage = "Cleared cookies & cache for $host") }
+        }
+    }
+
+    private fun sanitizeOrigin(origin: String): String {
+        return origin.replace("https://", "")
+            .replace("http://", "")
+            .replace("/", "_")
+            .replace(":", "_")
+    }
+
+    // -------------------------------------------------------------
+    // GREASYFORK API LIVE SEARCH & 1-TAP INSTALL
+    // -------------------------------------------------------------
+
+    fun searchGreasyFork(query: String) {
+        _uiState.update { it.copy(greasyForkSearchQuery = query, isSearchingGreasyFork = true) }
+        viewModelScope.launch {
+            val results = greasyForkRepo.searchScripts(query)
+            _uiState.update {
+                it.copy(
+                    greasyForkResults = results,
+                    isSearchingGreasyFork = false
+                )
+            }
+        }
+    }
+
+    fun installGreasyForkScript(item: GreasyForkScriptItem) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(isFetchingScript = true) }
+            val rawCode = greasyForkRepo.fetchScriptCode(item.codeUrl)
+            if (rawCode.isNotBlank()) {
+                val parsed = UserScriptParser.parse(rawCode, item.codeUrl)
+                // Prefetch any @require dependencies in background
+                dependencyManager.prefetchDependencies(parsed.requires)
+                repository.insertScript(parsed)
+                _uiState.update {
+                    it.copy(
+                        isFetchingScript = false,
+                        consoleMessage = "Successfully installed '${parsed.name}' from GreasyFork"
+                    )
+                }
+            } else {
+                _uiState.update {
+                    it.copy(
+                        isFetchingScript = false,
+                        consoleMessage = "Failed to download script from GreasyFork"
+                    )
+                }
+            }
+        }
+    }
+
     // Sheet and Dialog visibility controls
     fun setScriptsSheetVisible(visible: Boolean) { _uiState.update { it.copy(isScriptsSheetVisible = visible) } }
     fun setBookmarksSheetVisible(visible: Boolean) { _uiState.update { it.copy(isBookmarksSheetVisible = visible) } }
     fun setTabSwitcherVisible(visible: Boolean) { _uiState.update { it.copy(isTabSwitcherVisible = visible) } }
-    fun setScriptStoreVisible(visible: Boolean) { _uiState.update { it.copy(isScriptStoreVisible = visible) } }
+    fun setScriptStoreVisible(visible: Boolean) {
+        _uiState.update { it.copy(isScriptStoreVisible = visible) }
+        if (visible && _uiState.value.greasyForkResults.isEmpty()) {
+            searchGreasyFork("")
+        }
+    }
     fun setJsConsoleVisible(visible: Boolean) { _uiState.update { it.copy(isJsConsoleVisible = visible) } }
     fun setSettingsSheetVisible(visible: Boolean) { _uiState.update { it.copy(isSettingsSheetVisible = visible) } }
+    fun setSiteShieldVisible(visible: Boolean) { _uiState.update { it.copy(isSiteShieldVisible = visible) } }
     fun setFindBarVisible(visible: Boolean) { _uiState.update { it.copy(isFindBarVisible = visible) } }
     fun setFindQuery(query: String) { _uiState.update { it.copy(findQuery = query) } }
     fun setAddingScript(adding: Boolean) { _uiState.update { it.copy(isAddingScript = adding) } }
@@ -449,6 +718,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
 
     fun saveScript(script: UserScript) {
         viewModelScope.launch {
+            dependencyManager.prefetchDependencies(script.requires)
             repository.insertScript(script)
             _uiState.update { it.copy(isAddingScript = false, scriptBeingEdited = null) }
         }
@@ -456,6 +726,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
 
     fun installStoreScript(script: UserScript) {
         viewModelScope.launch {
+            dependencyManager.prefetchDependencies(script.requires)
             repository.insertScript(script)
             _uiState.update { it.copy(consoleMessage = "Installed '${script.name}' to UserScripts") }
         }
@@ -498,6 +769,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
 
                 val content = conn.inputStream.bufferedReader().use { it.readText() }
                 val parsedScript = UserScriptParser.parse(content, scriptUrl)
+                dependencyManager.prefetchDependencies(parsedScript.requires)
                 _uiState.update {
                     it.copy(
                         pendingInstallScript = parsedScript,
@@ -517,6 +789,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
 
     fun confirmInstallPendingScript(script: UserScript) {
         viewModelScope.launch {
+            dependencyManager.prefetchDependencies(script.requires)
             repository.insertScript(script)
             _uiState.update {
                 it.copy(
@@ -533,6 +806,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
 
     fun importUserScript(script: UserScript) {
         viewModelScope.launch {
+            dependencyManager.prefetchDependencies(script.requires)
             repository.insertScript(script)
             _uiState.update {
                 it.copy(consoleMessage = "Imported script: ${script.name}")
@@ -544,19 +818,53 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         _uiState.update { it.copy(consoleMessage = null) }
     }
 
-    private fun formatInputAsUrl(input: String, searchEngine: String): String {
-        if (input.isBlank()) return "about:blank"
-        if (input.startsWith("http://") || input.startsWith("https://") || input.startsWith("about:") || input.startsWith("file://")) {
-            return input
+    fun formatInputAsUrl(input: String, searchEngine: String): String {
+        val trimmed = input.trim()
+        if (trimmed.isBlank()) return "about:blank"
+        if (trimmed.startsWith("http://") || trimmed.startsWith("https://") || trimmed.startsWith("about:") || trimmed.startsWith("file://")) {
+            return trimmed
         }
-        val isDomainLike = input.contains(".") && !input.contains(" ") && input.length > 3
+
+        // Quick search prefixes
+        val prefixMap = listOf(
+            Pair("@yt ", "https://www.youtube.com/results?search_query="),
+            Pair("@youtube ", "https://www.youtube.com/results?search_query="),
+            Pair("@wiki ", "https://en.wikipedia.org/wiki/Special:Search?search="),
+            Pair("@w ", "https://en.wikipedia.org/wiki/Special:Search?search="),
+            Pair("@g ", "https://www.google.com/search?q="),
+            Pair("@google ", "https://www.google.com/search?q="),
+            Pair("@ddg ", "https://duckduckgo.com/?q="),
+            Pair("@bing ", "https://www.bing.com/search?q="),
+            Pair("@brave ", "https://search.brave.com/search?q="),
+            Pair("@eco ", "https://www.ecosia.org/search?q="),
+            Pair("@ecosia ", "https://www.ecosia.org/search?q="),
+            Pair("@sp ", "https://www.startpage.com/do/dsearch?query="),
+            Pair("@startpage ", "https://www.startpage.com/do/dsearch?query="),
+            Pair("@gh ", "https://github.com/search?q="),
+            Pair("@github ", "https://github.com/search?q="),
+            Pair("@reddit ", "https://www.reddit.com/search/?q=")
+        )
+
+        for ((prefix, searchUrl) in prefixMap) {
+            if (trimmed.startsWith(prefix, ignoreCase = true)) {
+                val query = trimmed.substring(prefix.length).trim()
+                return searchUrl + URLEncoder.encode(query, "UTF-8")
+            }
+        }
+
+        // Domain-like check (e.g. "reddit.com", "example.org/path")
+        val isDomainLike = trimmed.contains(".") && !trimmed.contains(" ") && trimmed.length > 3
         return if (isDomainLike) {
-            "https://$input"
+            "https://$trimmed"
         } else {
-            val encoded = java.net.URLEncoder.encode(input, "UTF-8")
+            val encoded = URLEncoder.encode(trimmed, "UTF-8")
             when (searchEngine) {
                 "Google" -> "https://www.google.com/search?q=$encoded"
                 "Bing" -> "https://www.bing.com/search?q=$encoded"
+                "Yahoo" -> "https://search.yahoo.com/search?p=$encoded"
+                "Ecosia" -> "https://www.ecosia.org/search?q=$encoded"
+                "Brave" -> "https://search.brave.com/search?q=$encoded"
+                "Startpage" -> "https://www.startpage.com/do/dsearch?query=$encoded"
                 else -> "https://duckduckgo.com/?q=$encoded"
             }
         }

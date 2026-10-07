@@ -19,7 +19,8 @@ class IndowebWebChromeClient(
     private val context: Context,
     private val viewModel: BrowserViewModel,
     private val onFileChooser: ((ValueCallback<Array<Uri>>?, FileChooserParams?) -> Boolean)? = null,
-    private val fullScreenContainer: FrameLayout? = null
+    private val onShowFullscreen: ((View, CustomViewCallback) -> Unit)? = null,
+    private val onHideFullscreen: (() -> Unit)? = null
 ) : WebChromeClient() {
 
     private var customView: View? = null
@@ -85,40 +86,34 @@ class IndowebWebChromeClient(
         return onFileChooser?.invoke(filePathCallback, fileChooserParams) ?: false
     }
 
+    /**
+     * Replaces unsafe auto-grant with explicit privacy checks & interactive dialog prompt.
+     */
     override fun onPermissionRequest(request: PermissionRequest?) {
-        // Automatically grant requested WebRTC permissions (Camera, Mic) if approved
-        request?.let {
-            it.grant(it.resources)
-        }
+        viewModel.handlePermissionRequest(request)
     }
 
+    /**
+     * Prompts the user before exposing device location to any website.
+     */
     override fun onGeolocationPermissionsShowPrompt(
         origin: String?,
         callback: GeolocationPermissions.Callback?
     ) {
-        callback?.invoke(origin, true, false)
+        viewModel.handleGeolocationPermission(origin, callback)
     }
 
     override fun onShowCustomView(view: View?, callback: CustomViewCallback?) {
         super.onShowCustomView(view, callback)
-        if (customView != null) {
-            callback?.onCustomViewHidden()
-            return
-        }
+        if (view == null || callback == null) return
         customView = view
         customViewCallback = callback
-        fullScreenContainer?.apply {
-            visibility = View.VISIBLE
-            addView(view, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-        }
+        onShowFullscreen?.invoke(view, callback)
     }
 
     override fun onHideCustomView() {
         super.onHideCustomView()
-        fullScreenContainer?.apply {
-            visibility = View.GONE
-            removeView(customView)
-        }
+        onHideFullscreen?.invoke()
         customView = null
         customViewCallback?.onCustomViewHidden()
         customViewCallback = null

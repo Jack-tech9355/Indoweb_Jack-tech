@@ -14,13 +14,14 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.VerticalAlignBottom
 import androidx.compose.material.icons.filled.VerticalAlignTop
 import androidx.compose.material3.Card
@@ -32,7 +33,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -40,6 +40,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -51,10 +52,13 @@ fun BrowserSettingsSheet(
     isAddressBarAtBottom: Boolean,
     searchEngine: String,
     currentUserAgent: UserAgentType,
+    isAdBlockerEnabled: Boolean,
     onToggleAddressBarPosition: () -> Unit,
     onSelectSearchEngine: (String) -> Unit,
     onSelectUserAgent: (UserAgentType) -> Unit,
+    onToggleAdBlocker: () -> Unit,
     onPrintToPdf: () -> Unit,
+    onSaveMhtml: () -> Unit,
     onClearData: () -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -99,6 +103,21 @@ fun BrowserSettingsSheet(
 
             Spacer(modifier = Modifier.height(12.dp))
 
+            // Ad-Blocker & Cosmetic Filter
+            SettingsCard(
+                title = "Built-in Ad & Tracker Blocker",
+                subtitle = if (isAdBlockerEnabled) "Blocking tracking scripts, cookies & ads" else "Disabled",
+                icon = Icons.Default.Shield
+            ) {
+                Switch(
+                    checked = isAdBlockerEnabled,
+                    onCheckedChange = { onToggleAdBlocker() },
+                    modifier = Modifier.testTag("settings_adblocker_switch")
+                )
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
             // Address Bar Position Toggle
             SettingsCard(
                 title = "Address Bar Position",
@@ -113,7 +132,7 @@ fun BrowserSettingsSheet(
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            // Search Engine
+            // Search Engines (Google, DuckDuckGo, Bing, Yahoo, Ecosia, Brave, Startpage)
             Card(
                 colors = CardDefaults.cardColors(
                     containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
@@ -139,15 +158,35 @@ fun BrowserSettingsSheet(
 
                     Spacer(modifier = Modifier.height(8.dp))
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        listOf("DuckDuckGo", "Google", "Bing").forEach { engine ->
-                            FilterChip(
-                                selected = searchEngine == engine,
-                                onClick = { onSelectSearchEngine(engine) },
-                                label = { Text(engine, fontSize = 12.sp) }
-                            )
+                    val engines = listOf("DuckDuckGo", "Google", "Bing", "Brave", "Ecosia", "Startpage", "Yahoo")
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            engines.take(4).forEach { engine ->
+                                FilterChip(
+                                    selected = searchEngine == engine,
+                                    onClick = { onSelectSearchEngine(engine) },
+                                    label = { Text(engine, fontSize = 11.sp) }
+                                )
+                            }
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            engines.drop(4).forEach { engine ->
+                                FilterChip(
+                                    selected = searchEngine == engine,
+                                    onClick = { onSelectSearchEngine(engine) },
+                                    label = { Text(engine, fontSize = 11.sp) }
+                                )
+                            }
                         }
                     }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Quick prefixes in URL bar: @yt (YouTube), @wiki (Wikipedia), @g (Google), @ddg (DuckDuckGo), @bing (Bing), @brave (Brave), @gh (GitHub), @reddit (Reddit)",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 11.sp
+                    )
                 }
             }
 
@@ -213,25 +252,61 @@ fun BrowserSettingsSheet(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(14.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = Icons.Default.PictureAsPdf,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(20.dp)
+                    Icon(
+                        imageVector = Icons.Default.PictureAsPdf,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Column {
+                        Text("Save Webpage as PDF", fontWeight = FontWeight.Bold)
+                        Text(
+                            "Print or export current page to PDF file via Android PrintManager",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Column {
-                            Text("Save Webpage as PDF", fontWeight = FontWeight.Bold)
-                            Text(
-                                "Print or export current page to PDF file",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Save Offline MHTML Web Archive
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                ),
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable {
+                        onDismiss()
+                        onSaveMhtml()
+                    }
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Archive,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Column {
+                        Text("Save as Offline Web Archive (.mhtml)", fontWeight = FontWeight.Bold)
+                        Text(
+                            "Export complete webpage with images and CSS for offline reading",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                 }
             }
@@ -255,29 +330,26 @@ fun BrowserSettingsSheet(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(14.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = Icons.Default.DeleteSweep,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.error,
-                            modifier = Modifier.size(20.dp)
+                    Icon(
+                        imageVector = Icons.Default.DeleteSweep,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Column {
+                        Text(
+                            "Clear All Browsing Data",
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.error
                         )
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Column {
-                            Text(
-                                "Clear All Browsing Data",
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.error
-                            )
-                            Text(
-                                "Wipe cookies, cache, local storage and history",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
+                        Text(
+                            "Wipe cookies, cache, local storage and history",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                 }
             }
